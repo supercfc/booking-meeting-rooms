@@ -27,11 +27,14 @@ npm install
 2. 設定 Firebase 配置：
    - 複製 `.env.example` 為 `.env`
    - 在 Firebase Console 取得專案配置資訊
-   - 將配置資訊填入 `.env` 檔案
+   - 將配置資訊填入 `.env` 檔案（注意：環境變數需使用 `VITE_` 前綴）
 
 ```bash
 cp .env.example .env
 # 編輯 .env 並填入您的 Firebase 配置
+# 範例：
+# VITE_FIREBASE_CONFIG={"apiKey":"...","authDomain":"...","projectId":"...","storageBucket":"...","messagingSenderId":"...","appId":"..."}
+# VITE_APP_ID=my-app-id
 ```
 
 ## 執行應用程式
