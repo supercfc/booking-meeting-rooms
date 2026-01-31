@@ -81,11 +81,11 @@ const getMemberDisplayName = (id, members) => {
 };
 
 // --- Firebase 初始化 ---
-const firebaseConfig = JSON.parse(__firebase_config);
+const firebaseConfig = JSON.parse(import.meta.env.VITE_FIREBASE_CONFIG);
 const firebaseApp = initializeApp(firebaseConfig);
 const auth = getAuth(firebaseApp);
 const db = getFirestore(firebaseApp);
-const defaultAppId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+const defaultAppId = import.meta.env.VITE_APP_ID || 'default-app-id';
 
 // --- 子組件：人員輸入框 ---
 const MemberInput = ({ member, onUpdate }) => {
@@ -191,11 +191,11 @@ const ReportSection = ({ currentMonth, setCurrentMonth, members, adhocBookings, 
                     if (slotBookings.length === 0) return null;
                     return (
                       <div key={slot.id} className="w-full flex flex-col items-center mt-1">
-                        <div className="text-[10px] font-black text-slate-400 border-b-2 border-slate-200 w-full mb-1 pb-1 font-black">{slot.label}</div>
+                        <div className="text-base font-black text-slate-500 border-b-2 border-slate-200 w-full mb-1 pb-1 font-black">{slot.label}</div>
                         {slotBookings.map((b, idx) => (
-                          <div key={idx} className={`w-full min-h-[42px] px-2 py-2 rounded-lg border-2 mb-1 flex flex-col items-center justify-center font-black ${b.isAdhoc ? 'bg-orange-50 text-orange-800 border-orange-100' : 'bg-blue-50 text-blue-900 border-blue-200'}`}>
-                            <div className="text-[14px] w-full text-center text-black font-black leading-tight font-black">{getMemberDisplayName(b.userId, members)}</div>
-                            <div className="text-[9px] opacity-70 w-full text-center font-bold text-black font-black">{b.room}</div>
+                          <div key={idx} className={`w-full min-h-[48px] px-3 py-2 rounded-lg border-2 mb-1 flex flex-col items-center justify-center font-black ${b.isAdhoc ? 'bg-orange-50 text-orange-800 border-orange-100' : 'bg-blue-50 text-blue-900 border-blue-200'}`}>
+                            <div className="text-xl w-full text-center text-black font-black leading-tight font-black">{getMemberDisplayName(b.userId, members)}</div>
+                            <div className="text-sm opacity-70 w-full text-center font-bold text-black font-black">{b.room}</div>
                           </div>
                         ))}
                       </div>
@@ -228,11 +228,16 @@ const App = () => {
   const [fixedSchedules, setFixedSchedules] = useState([]);
   const [adhocBookings, setAdhocBookings] = useState([]);
   const fileInputRef = useRef(null);
-
+  
   // 預約詳情彈窗狀態
   const [formRoom, setFormRoom] = useState(ROOMS[0]);
   const [formTime, setFormTime] = useState(TIME_SLOTS[0].id);
   const [formUser, setFormUser] = useState("");
+  const [passwordInput, setPasswordInput] = useState("");
+
+  useEffect(() => {
+    if (deleteTarget) setPasswordInput("");
+  }, [deleteTarget]);
 
   const showNotification = (msg, type = 'info') => {
     setNotification({ msg, type });
@@ -295,21 +300,31 @@ const App = () => {
   };
 
   const executeAuthAction = async () => {
-    if (!user || !deleteTarget) return;
+    const target = deleteTarget;
+    const importData = pendingImportData;
+    
+    // 先關閉對話框
+    setDeleteTarget(null);
+    setPendingImportData(null);
+    
+    if (!target) return;
+    if (!user) {
+      showNotification('尚未登入，請稍後再試', 'error');
+      return;
+    }
     try {
       const basePath = ['artifacts', syncKey, 'public', 'data'];
-      if (deleteTarget.type === 'fixed') { await deleteDoc(doc(db, ...basePath, 'fixedSchedules', deleteTarget.id)); showNotification('已移除排班', 'info'); }
-      else if (deleteTarget.type === 'adhoc') { await deleteDoc(doc(db, ...basePath, 'adhocBookings', deleteTarget.id)); showNotification('已取消預約', 'info'); }
-      else if (deleteTarget.type === 'import') {
+      if (target.type === 'fixed') { await deleteDoc(doc(db, ...basePath, 'fixedSchedules', target.id)); showNotification('已移除排班', 'info'); }
+      else if (target.type === 'adhoc') { await deleteDoc(doc(db, ...basePath, 'adhocBookings', target.id)); showNotification('已取消預約', 'info'); }
+      else if (target.type === 'import') {
         const batch = writeBatch(db);
-        const data = pendingImportData;
-        if (data.members) data.members.forEach(m => batch.set(doc(db, ...basePath, 'members', m.id), m));
-        if (data.fixedSchedules) data.fixedSchedules.forEach(f => batch.set(doc(db, ...basePath, 'fixedSchedules', `${f.weekday}_${f.room}_${f.timeSlot}`), f));
-        if (data.adhocBookings) data.adhocBookings.forEach(a => batch.set(doc(db, ...basePath, 'adhocBookings', `${a.date}_${a.room}_${a.timeSlot}`), a));
+        const data = importData;
+        if (data && data.members) data.members.forEach(m => batch.set(doc(db, ...basePath, 'members', m.id), m));
+        if (data && data.fixedSchedules) data.fixedSchedules.forEach(f => batch.set(doc(db, ...basePath, 'fixedSchedules', `${f.weekday}_${f.room}_${f.timeSlot}`), f));
+        if (data && data.adhocBookings) data.adhocBookings.forEach(a => batch.set(doc(db, ...basePath, 'adhocBookings', `${a.date}_${a.room}_${a.timeSlot}`), a));
         await batch.commit();
         showNotification('雲端還原完成', 'success');
       }
-      setDeleteTarget(null);
     } catch (err) { showNotification('執行失敗', 'error'); }
   };
 
@@ -544,10 +559,10 @@ const App = () => {
             <div className={`w-24 h-24 ${deleteTarget.type==='import'?'bg-orange-100 text-orange-600':'bg-red-100 text-red-600'} rounded-full flex items-center justify-center mb-8 mx-auto shadow-inner font-black`}><Lock size={48}/></div>
             <h3 className="text-3xl font-black text-slate-800 text-center mb-4 font-black">安全管理驗證</h3>
             <p className="text-slate-500 text-lg text-center mb-10 leading-relaxed font-black text-black font-black">執行項目：<br/><span className="font-black text-slate-900 text-xl border-b-4 border-slate-100 pb-1 font-black">{deleteTarget.label}</span></p>
-            <input type="password" id="p-chk" className="w-full border-b-[8px] border-slate-100 p-4 text-center text-5xl tracking-[0.5em] outline-none focus:border-blue-500 transition-all bg-transparent mb-4 font-mono text-slate-900 font-black" placeholder="••••" autoFocus onKeyDown={e=>e.key==='Enter' && (document.getElementById('p-chk').value===DELETE_PASSWORD ? executeAuthAction() : showNotification('密碼錯誤','error'))} />
+            <input type="password" value={passwordInput} onChange={(e)=>setPasswordInput(e.target.value)} className="w-full border-b-[8px] border-slate-100 p-4 text-center text-5xl tracking-[0.5em] outline-none focus:border-blue-500 transition-all bg-transparent mb-4 font-mono text-slate-900 font-black" placeholder="••••" autoFocus onKeyDown={e=>{ if(e.key==='Enter') { if(passwordInput===DELETE_PASSWORD) { executeAuthAction(); } else { showNotification('密碼錯誤','error'); } } }} />
             <div className="grid grid-cols-2 gap-6 mt-12 font-black">
               <button onClick={()=>{setDeleteTarget(null);setPendingImportData(null);}} className="py-6 rounded-2xl font-black text-slate-400 hover:bg-slate-50 transition-colors uppercase tracking-widest text-sm font-black">取消</button>
-              <button onClick={()=>{ if(document.getElementById('p-chk').value===DELETE_PASSWORD) executeAuthAction(); else showNotification('密碼錯誤','error'); }} className={`py-6 rounded-2xl font-black text-white shadow-2xl ${deleteTarget.type==='import'?'bg-orange-600 shadow-orange-200':'bg-red-600 shadow-red-200'} active:scale-95 transition-all text-sm uppercase tracking-widest font-black font-black`}>執行</button>
+              <button onClick={()=>{ if(passwordInput===DELETE_PASSWORD) { executeAuthAction(); } else { showNotification('密碼錯誤','error'); } }} className={`py-6 rounded-2xl font-black text-white shadow-2xl ${deleteTarget.type==='import'?'bg-orange-600 shadow-orange-200':'bg-red-600 shadow-red-200'} active:scale-95 transition-all text-sm uppercase tracking-widest font-black font-black`}>執行</button>
             </div>
           </div>
         </div>
