@@ -338,7 +338,7 @@ const App = () => {
         <div className="max-w-[1600px] mx-auto px-10 h-20 flex items-center justify-between">
           <div className="flex items-center gap-4">
             <Sunrise className="text-orange-400" size={32} />
-            <div className="flex flex-col"><h1 className="text-xl font-black tracking-tighter text-white font-black">談話室預約管理系統</h1><p className="text-[10px] text-slate-500 font-bold uppercase tracking-[0.3em] font-black">Probation Office System</p></div>
+            <div className="flex flex-col"><h1 className="text-xl font-black tracking-tighter text-white font-black">談話室預約系統</h1></div>
           </div>
           <nav className="flex items-center gap-2">
             {[{id:'calendar',icon:<CalendarIcon size={18}/>,label:'預約現況'},{id:'fixed',icon:<Settings size={18}/>,label:'固定排班'},{id:'members',icon:<Users size={18}/>,label:'人員管理'},{id:'reports',icon:<FileText size={18}/>,label:'報表彙整'},{id:'data',icon:<Save size={18}/>,label:'系統維護'}].map(tab => (
@@ -507,7 +507,7 @@ const App = () => {
               </div>
 
               {/* 第三欄：預約登記表單 - 高效佈局 */}
-              <div className="flex flex-col p-4 bg-slate-50 justify-center font-black">
+              <div className="flex flex-col p-4 bg-slate-50 justify-start font-black">
                 <div className="p-5 border-2 border-dashed rounded-3xl bg-white border-blue-200 shadow-md font-black">
                   <div className="flex items-center gap-3 mb-4 font-black">
                     <UserPlus className="text-blue-600 font-black" size={24}/>
