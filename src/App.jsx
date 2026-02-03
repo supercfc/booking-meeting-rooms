@@ -39,7 +39,8 @@ import {
   onSnapshot, 
   deleteDoc, 
   writeBatch,
-  query
+  query,
+  getDocs
 } from 'firebase/firestore';
 
 // --- 常數與工具函數 ---
@@ -50,6 +51,73 @@ const TIME_SLOTS = [
   { id: 'morning', label: '上午' },
   { id: 'afternoon', label: '下午' }
 ];
+
+// 小時制時間選項
+const MORNING_HOURS = ['08:00', '09:00', '10:00', '11:00', '12:00'];
+const AFTERNOON_HOURS = ['13:00', '14:00', '15:00', '16:00', '17:00'];
+const ALL_HOURS = [...MORNING_HOURS, ...AFTERNOON_HOURS];
+
+// 檢查兩個時段是否衝突
+const isTimeConflict = (start1, end1, start2, end2) => {
+  return start1 < end2 && end1 > start2;
+};
+
+// 將 timeSlot 轉換為 startTime/endTime
+const convertTimeSlot = (booking) => {
+  if (booking.startTime && booking.endTime) return booking;
+  if (booking.timeSlot === 'morning') {
+    return { ...booking, startTime: '08:00', endTime: '12:00' };
+  } else if (booking.timeSlot === 'afternoon') {
+    return { ...booking, startTime: '13:00', endTime: '17:00' };
+  }
+  return booking;
+};
+
+// 取得某日某房間的所有預約時段（統一轉換為 startTime/endTime 格式）
+const getBookingsForRoomDate = (room, date, adhocBookings, fixedSchedules) => {
+  const dow = new Date(date).getDay();
+  const adhocs = adhocBookings.filter(x => x.date === date && x.room === room).map(convertTimeSlot);
+  const fixed = fixedSchedules.filter(x => x.weekday === dow && x.room === room).map(convertTimeSlot);
+  return [...adhocs, ...fixed];
+};
+
+// 檢查是否有衝突
+const hasConflict = (room, date, startTime, endTime, adhocBookings, fixedSchedules, excludeId = null) => {
+  const existing = getBookingsForRoomDate(room, date, adhocBookings, fixedSchedules);
+  return existing.some(b => {
+    if (excludeId && (b.ahId === excludeId || b.fsId === excludeId)) return false;
+    return isTimeConflict(startTime, endTime, b.startTime, b.endTime);
+  });
+};
+
+// 合併連續時段（同一人、同一房間）
+const mergeConsecutiveSlots = (bookings, members) => {
+  if (!bookings || bookings.length === 0) return [];
+  
+  // 按照開始時間排序
+  const sorted = [...bookings].sort((a, b) => a.startTime.localeCompare(b.startTime));
+  const merged = [];
+  
+  for (const booking of sorted) {
+    const last = merged[merged.length - 1];
+    // 如果上一筆和本筆是同一人、連續時段，則合併
+    if (last && last.userId === booking.userId && last.endTime === booking.startTime) {
+      last.endTime = booking.endTime;
+      last.mergedIds = [...(last.mergedIds || [last.ahId || last.fsId]), booking.ahId || booking.fsId];
+    } else {
+      merged.push({ ...booking, mergedIds: [booking.ahId || booking.fsId] });
+    }
+  }
+  
+  return merged;
+};
+
+// 格式化時間顯示（移除分鐘）
+const formatTimeRange = (startTime, endTime) => {
+  const start = startTime.split(':')[0];
+  const end = endTime.split(':')[0];
+  return `${start}-${end}`;
+};
 
 const HOLIDAYS_2026 = [
   '2026-01-01', // 元旦 (週四)
@@ -166,7 +234,7 @@ const ReportSection = ({ currentMonth, setCurrentMonth, members, adhocBookings, 
       <div ref={pdfRef} className="bg-white p-12 rounded-xl shadow-2xl border mx-auto text-black" style={{ width: '850px' }}>
         <div className="mb-10 text-center border-b-8 border-slate-900 pb-6">
           <h1 className="text-4xl font-black text-slate-900 tracking-tight font-black">{YEAR} 年 {currentMonth} 月 談話室預約報表</h1>
-          <p className="mt-4 text-slate-500 font-bold text-lg font-black">產製日期：{new Date().toLocaleDateString()}</p>
+          <p className="mt-4 text-slate-500 font-bold text-lg font-black">產生日期：{new Date().toLocaleDateString()}</p>
         </div>
         <div className="grid grid-cols-7 border-4 border-slate-900 bg-slate-50 text-black">
           {['日', '一', '二', '三', '四', '五', '六'].map(d => (<div key={d} className="py-4 text-center font-black text-slate-900 border-x-2 border-slate-200 text-xl font-black">週{d}</div>))}
@@ -178,24 +246,40 @@ const ReportSection = ({ currentMonth, setCurrentMonth, members, adhocBookings, 
             const dateStr = formatDate(currentMonth, dayNum);
             const holiday = isHoliday(dateStr);
             const dow = new Date(dateStr).getDay();
+            
+            // 取得該日所有預約（依時段分組）
+            const getRoomBookings = (room, isMorning) => {
+              const allBookings = getBookingsForRoomDate(room, dateStr, adhocBookings, fixedSchedules);
+              const filtered = allBookings.filter(b => {
+                if (isMorning) return b.startTime < '13:00';
+                return b.startTime >= '13:00';
+              });
+              return mergeConsecutiveSlots(filtered, members);
+            };
+            
             return (
               <div key={dayNum} className={`min-h-[160px] p-3 border-2 border-slate-500 flex flex-col justify-start text-center ${holiday ? 'bg-red-50/50' : 'bg-white'}`}>
                 <div className="mb-2 text-center text-black font-black font-black"><span className={`text-4xl font-black ${holiday ? 'text-red-500' : 'text-slate-900'}`}>{dayNum}</span></div>
                 <div className="space-y-3 flex flex-col items-center justify-start flex-1 pb-4 text-black">
                   {TIME_SLOTS.map(slot => {
-                    const slotBookings = ROOMS.map(r => {
-                      const bA = adhocBookings.find(x => x.date === dateStr && x.room === r && x.timeSlot === slot.id);
-                      const bF = fixedSchedules.find(x => x.weekday === dow && x.room === r && x.timeSlot === slot.id);
-                      return bA || bF ? { room: r, isAdhoc: !!bA, userId: (bA || bF).userId } : null;
-                    }).filter(x => x !== null);
+                    const isMorning = slot.id === 'morning';
+                    const slotBookings = ROOMS.flatMap(r => {
+                      const bookings = getRoomBookings(r, isMorning);
+                      return bookings.map(b => ({ 
+                        room: r, 
+                        isAdhoc: !!b.ahId, 
+                        userId: b.userId,
+                        timeRange: formatTimeRange(b.startTime, b.endTime)
+                      }));
+                    });
                     if (slotBookings.length === 0) return null;
                     return (
                       <div key={slot.id} className="w-full flex flex-col items-center mt-1">
                         <div className="text-base font-black text-slate-500 border-b-2 border-slate-200 w-full mb-1 pb-1 font-black">{slot.label}</div>
                         {slotBookings.map((b, idx) => (
-                          <div key={idx} className={`w-full min-h-[48px] px-3 py-2 rounded-lg border-2 mb-1 flex flex-col items-center justify-center font-black ${b.isAdhoc ? 'bg-orange-50 text-orange-800 border-orange-100' : 'bg-blue-50 text-blue-900 border-blue-200'}`}>
+                          <div key={idx} className={`w-full min-h-[36px] px-3 py-2 rounded-lg border-2 mb-1 flex flex-col items-center justify-center font-black ${b.isAdhoc ? 'bg-orange-50 text-orange-800 border-orange-100' : 'bg-blue-50 text-blue-900 border-blue-200'}`}>
                             <div className="text-xl w-full text-center text-black font-black leading-tight font-black">{getMemberDisplayName(b.userId, members)}</div>
-                            <div className="text-sm opacity-70 w-full text-center font-bold text-black font-black">{b.room}</div>
+                            <div className="text-sm opacity-70 w-full text-center font-bold text-black font-black">{b.room}<br/> ({b.timeRange})</div>
                           </div>
                         ))}
                       </div>
@@ -231,7 +315,8 @@ const App = () => {
   
   // 預約詳情彈窗狀態
   const [formRoom, setFormRoom] = useState(ROOMS[0]);
-  const [formTime, setFormTime] = useState(TIME_SLOTS[0].id);
+  const [formStartTime, setFormStartTime] = useState('08:00');
+  const [formEndTime, setFormEndTime] = useState('12:00');
   const [formUser, setFormUser] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
 
@@ -292,10 +377,10 @@ const App = () => {
     showNotification('固定排班已更新', 'success');
   };
 
-  const handleAddAdhoc = async (date, room, userId, timeSlot) => {
+  const handleAddAdhoc = async (date, room, userId, startTime, endTime) => {
     if (!user || !userId) return;
-    const ahId = `${date}_${room}_${timeSlot}`;
-    await setDoc(doc(db, 'artifacts', syncKey, 'public', 'data', 'adhocBookings', ahId), { date, room, userId, timeSlot });
+    const ahId = `${date}_${room}_${startTime}_${endTime}`;
+    await setDoc(doc(db, 'artifacts', syncKey, 'public', 'data', 'adhocBookings', ahId), { date, room, userId, startTime, endTime });
     showNotification('預約成功', 'success');
   };
 
@@ -317,11 +402,23 @@ const App = () => {
       if (target.type === 'fixed') { await deleteDoc(doc(db, ...basePath, 'fixedSchedules', target.id)); showNotification('已移除排班', 'info'); }
       else if (target.type === 'adhoc') { await deleteDoc(doc(db, ...basePath, 'adhocBookings', target.id)); showNotification('已取消預約', 'info'); }
       else if (target.type === 'import') {
-        const batch = writeBatch(db);
         const data = importData;
+        
+        // 先刪除所有現有的 adhocBookings（避免新舊格式重複）
+        const existingAdhocs = await getDocs(collection(db, ...basePath, 'adhocBookings'));
+        const deleteBatch = writeBatch(db);
+        existingAdhocs.docs.forEach(d => deleteBatch.delete(d.ref));
+        await deleteBatch.commit();
+        
+        // 再寫入新資料
+        const batch = writeBatch(db);
         if (data && data.members) data.members.forEach(m => batch.set(doc(db, ...basePath, 'members', m.id), m));
         if (data && data.fixedSchedules) data.fixedSchedules.forEach(f => batch.set(doc(db, ...basePath, 'fixedSchedules', `${f.weekday}_${f.room}_${f.timeSlot}`), f));
-        if (data && data.adhocBookings) data.adhocBookings.forEach(a => batch.set(doc(db, ...basePath, 'adhocBookings', `${a.date}_${a.room}_${a.timeSlot}`), a));
+        if (data && data.adhocBookings) data.adhocBookings.forEach(a => {
+          // 支援新舊兩種格式
+          const ahId = a.startTime ? `${a.date}_${a.room}_${a.startTime}_${a.endTime}` : `${a.date}_${a.room}_${a.timeSlot}`;
+          batch.set(doc(db, ...basePath, 'adhocBookings', ahId), a);
+        });
         await batch.commit();
         showNotification('雲端還原完成', 'success');
       }
@@ -366,16 +463,32 @@ const App = () => {
                   const dateStr = formatDate(currentMonth, i + 1);
                   const holiday = isHoliday(dateStr);
                   const dow = new Date(dateStr).getDay();
+                  
+                  // 取得該日所有預約（依房間分組並合併連續時段）
+                  const getRoomBookings = (room, isMorning) => {
+                    const allBookings = getBookingsForRoomDate(room, dateStr, adhocBookings, fixedSchedules);
+                    const filtered = allBookings.filter(b => {
+                      if (isMorning) return b.startTime < '13:00';
+                      return b.startTime >= '13:00';
+                    });
+                    return mergeConsecutiveSlots(filtered, members);
+                  };
+                  
                   return (
                     <div key={i} onClick={() => !holiday && setSelectedDate(dateStr)} className={`min-h-[280px] h-auto p-5 border-4 rounded-[3rem] shadow-md transition-all overflow-hidden ${holiday ? 'bg-red-50 border-red-100' : 'bg-white border-white hover:border-blue-500 cursor-pointer hover:shadow-2xl'}`}>
                       <span className={`font-black text-5xl ${holiday ? 'text-red-400' : 'text-slate-900'} font-black`}>{i+1}</span>
                       <div className="mt-8 space-y-6">
                         {TIME_SLOTS.map(slot => {
-                          const slotItems = ROOMS.map(r => {
-                            const bA = adhocBookings.find(x => x.date === dateStr && x.room === r && x.timeSlot === slot.id);
-                            const bF = fixedSchedules.find(x => x.weekday === dow && x.room === r && x.timeSlot === slot.id);
-                            return bA || bF ? { room: r, isAdhoc: !!bA, userId: (bA || bF).userId } : null;
-                          }).filter(x => x !== null);
+                          const isMorning = slot.id === 'morning';
+                          const slotItems = ROOMS.flatMap(r => {
+                            const bookings = getRoomBookings(r, isMorning);
+                            return bookings.map(b => ({ 
+                              room: r, 
+                              isAdhoc: !!b.ahId, 
+                              userId: b.userId,
+                              timeRange: formatTimeRange(b.startTime, b.endTime)
+                            }));
+                          });
                           if (slotItems.length === 0) return null;
                           return (
                             <div key={slot.id} className="relative">
@@ -383,7 +496,10 @@ const App = () => {
                               <div className="space-y-2">
                                 {slotItems.map((item, idx) => (
                                   <div key={idx} className={`px-4 py-3 rounded-2xl flex justify-between items-center leading-none font-black border-2 shadow-sm ${item.isAdhoc ? 'bg-orange-50 text-orange-900 border-orange-100' : 'bg-blue-50 text-blue-900 border-blue-200'}`}>
-                                    <span className="opacity-40 text-[10px] mr-2 text-black font-bold font-black">{item.room}</span>
+                                    <div className="flex flex-col gap-1">
+                                      <span className="text-[14px] text-black font-bold font-black">{item.room}</span>
+                                      <span className="text-xs font-black">{item.timeRange}</span>
+                                    </div>
                                     <span className="text-[22px] flex-1 text-right text-black font-black leading-none font-black">{getMemberDisplayName(item.userId, members)}</span>
                                   </div>
                                 ))}
@@ -412,7 +528,7 @@ const App = () => {
               <div className="bg-white rounded-[3rem] shadow-xl border overflow-hidden">
                 <table className="w-full text-left">
                   <thead className="bg-slate-50 border-b-4 border-slate-100 text-black font-black"><tr><th className="p-8 font-black text-xl text-slate-500 font-black font-black">日期與時段</th><th className="p-8 font-black text-xl text-slate-500 font-black font-black">空間</th><th className="p-8 font-black text-xl text-slate-500 font-black font-black">使用者</th><th className="p-8 font-black text-xl text-slate-500 font-black font-black">管理</th></tr></thead>
-                  <tbody className="divide-y-2 divide-slate-50 text-black font-black font-black">{fixedSchedules.sort((a,b)=>a.weekday-b.weekday).map(f=>(<tr key={f.fsId} className="hover:bg-slate-50/50 transition-colors text-black font-black"><td className="p-8 font-black text-xl text-slate-700 font-black font-black">每週 {['日','一','二','三','四','五','六'][f.weekday]} ({TIME_SLOTS.find(s=>s.id===f.timeSlot)?.label})</td><td className="p-8 font-bold text-slate-600 text-xl font-black font-black">{f.room}</td><td className="p-8 font-black text-blue-700 text-2xl font-black font-black">{getMemberDisplayName(f.userId, members)}</td><td className="p-8 font-black"><button onClick={()=>setDeleteTarget({type:'fixed',id:f.fsId,label:`星期${['日','一','二','三','四','五','六'][f.weekday]} ${f.room}`})} className="text-red-400 hover:text-red-600 p-3 rounded-2xl transition-all shadow-sm"><Trash2 size={24}/></button></td></tr>))}</tbody>
+                  <tbody className="divide-y-2 divide-slate-50 text-black font-black font-black">{fixedSchedules.sort((a,b)=>a.weekday-b.weekday).map(f=>(<tr key={f.fsId} className="hover:bg-slate-50/50 transition-colors text-black font-black"><td className="p-8 font-black text-xl text-slate-700 font-black font-black">每週 {['日','一','二','三','四','五','六'][f.weekday]} ({TIME_SLOTS.find(s=>s.id===f.timeSlot)?.label || f.timeSlot})</td><td className="p-8 font-bold text-slate-600 text-xl font-black font-black">{f.room}</td><td className="p-8 font-black text-blue-700 text-2xl font-black font-black">{getMemberDisplayName(f.userId, members)}</td><td className="p-8 font-black"><button onClick={()=>setDeleteTarget({type:'fixed',id:f.fsId,label:`星期${['日','一','二','三','四','五','六'][f.weekday]} ${TIME_SLOTS.find(s=>s.id===f.timeSlot)?.label || f.timeSlot} ${f.room}`})} className="text-red-400 hover:text-red-600 p-3 rounded-2xl transition-all shadow-sm"><Trash2 size={24}/></button></td></tr>))}</tbody>
                 </table>
               </div>
             </div>
@@ -459,22 +575,28 @@ const App = () => {
               {/* 第一欄：上午預約 */}
               <div className="flex flex-col p-3 overflow-hidden font-black">
                 <h4 className="font-black text-slate-800 text-lg tracking-widest flex items-center gap-2 border-b-2 border-orange-200 pb-1 mb-2 shrink-0 font-black">
-                  <Sunrise className="text-orange-500" size={20}/> 上午
+                  <Sunrise className="text-orange-500" size={20}/> 上午 (08:00-12:00)
                 </h4>
                 <div className="flex-1 overflow-y-auto custom-scroll space-y-1 pr-1 font-black">
                   {ROOMS.map(rm => {
-                    const bA = adhocBookings.find(x => x.date === selectedDate && x.room === rm && x.timeSlot === 'morning');
-                    const bF = fixedSchedules.find(x => x.weekday === new Date(selectedDate).getDay() && x.room === rm && x.timeSlot === 'morning');
-                    const b = bA || bF;
+                    const allBookings = getBookingsForRoomDate(rm, selectedDate, adhocBookings, fixedSchedules);
+                    const morningBookings = allBookings.filter(b => b.startTime < '13:00');
+                    const mergedBookings = mergeConsecutiveSlots(morningBookings, members);
+                    
                     return (
-                      <div key={rm} onClick={() => { setFormRoom(rm); setFormTime('morning'); }} className="flex justify-between items-center px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-100 hover:border-orange-400 hover:bg-white cursor-pointer transition-all shadow-sm group font-black">
+                      <div key={rm} onClick={() => { setFormRoom(rm); setFormStartTime('08:00'); setFormEndTime('12:00'); }} className="flex flex-col px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-100 hover:border-orange-400 hover:bg-white cursor-pointer transition-all shadow-sm group font-black">
                         <span className="font-black text-base text-slate-500 group-hover:text-orange-600 font-black">{rm}</span>
-                        {b ? (
-                          <div className="flex items-center gap-2 font-black">
-                            <span className="text-lg px-3 py-0.5 rounded-lg font-black bg-blue-50 text-blue-900 border border-blue-200 font-black">{getMemberDisplayName(b.userId, members)}</span>
-                            {bA && <button onClick={(e)=>{e.stopPropagation(); setDeleteTarget({type:'adhoc',id:b.ahId,label:`${selectedDate} 上午 ${rm}`});}} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button>}
+                        {mergedBookings.length > 0 ? (
+                          <div className="mt-1 space-y-1">
+                            {mergedBookings.map((b, idx) => (
+                              <div key={idx} className="flex items-center justify-between gap-2 font-black">
+                                <span className="text-xs text-slate-400">{formatTimeRange(b.startTime, b.endTime)}</span>
+                                <span className="text-lg px-3 py-0.5 rounded-lg font-black bg-blue-50 text-blue-900 border border-blue-200 font-black">{getMemberDisplayName(b.userId, members)}</span>
+                                {b.ahId && <button onClick={(e)=>{e.stopPropagation(); setDeleteTarget({type:'adhoc',id:b.ahId,label:`${selectedDate} ${formatTimeRange(b.startTime, b.endTime)} ${rm}`});}} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button>}
+                              </div>
+                            ))}
                           </div>
-                        ) : <span className="text-[10px] text-green-600 font-black px-2 py-0.5 bg-green-50 rounded-full border border-green-100 font-black">開放</span>}
+                        ) : <span className="text-[10px] text-green-600 font-black px-2 py-0.5 bg-green-50 rounded-full border border-green-100 font-black mt-1 self-start">開放</span>}
                       </div>
                     );
                   })}
@@ -484,34 +606,40 @@ const App = () => {
               {/* 第二欄：下午預約 */}
               <div className="flex flex-col p-3 overflow-hidden font-black">
                 <h4 className="font-black text-slate-800 text-lg tracking-widest flex items-center gap-2 border-b-2 border-blue-200 pb-1 mb-2 shrink-0 font-black">
-                  <Sunset className="text-blue-500" size={20}/> 下午
+                  <Sunset className="text-blue-500" size={20}/> 下午 (13:00-17:00)
                 </h4>
                 <div className="flex-1 overflow-y-auto custom-scroll space-y-1 pr-1 font-black">
                   {ROOMS.map(rm => {
-                    const bA = adhocBookings.find(x => x.date === selectedDate && x.room === rm && x.timeSlot === 'afternoon');
-                    const bF = fixedSchedules.find(x => x.weekday === new Date(selectedDate).getDay() && x.room === rm && x.timeSlot === 'afternoon');
-                    const b = bA || bF;
+                    const allBookings = getBookingsForRoomDate(rm, selectedDate, adhocBookings, fixedSchedules);
+                    const afternoonBookings = allBookings.filter(b => b.startTime >= '13:00');
+                    const mergedBookings = mergeConsecutiveSlots(afternoonBookings, members);
+                    
                     return (
-                      <div key={rm} onClick={() => { setFormRoom(rm); setFormTime('afternoon'); }} className="flex justify-between items-center px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-100 hover:border-blue-400 hover:bg-white cursor-pointer transition-all shadow-sm group font-black">
+                      <div key={rm} onClick={() => { setFormRoom(rm); setFormStartTime('13:00'); setFormEndTime('17:00'); }} className="flex flex-col px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-100 hover:border-blue-400 hover:bg-white cursor-pointer transition-all shadow-sm group font-black">
                         <span className="font-black text-base text-slate-500 group-hover:text-blue-600 font-black">{rm}</span>
-                        {b ? (
-                          <div className="flex items-center gap-2 font-black">
-                            <span className="text-xl px-3 py-0.5 rounded-lg font-black bg-blue-50 text-blue-900 border border-blue-200 font-black">{getMemberDisplayName(b.userId, members)}</span>
-                            {bA && <button onClick={(e)=>{e.stopPropagation(); setDeleteTarget({type:'adhoc',id:b.ahId,label:`${selectedDate} 下午 ${rm}`});}} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button>}
+                        {mergedBookings.length > 0 ? (
+                          <div className="mt-1 space-y-1">
+                            {mergedBookings.map((b, idx) => (
+                              <div key={idx} className="flex items-center justify-between gap-2 font-black">
+                                <span className="text-xs text-slate-400">{formatTimeRange(b.startTime, b.endTime)}</span>
+                                <span className="text-lg px-3 py-0.5 rounded-lg font-black bg-blue-50 text-blue-900 border border-blue-200 font-black">{getMemberDisplayName(b.userId, members)}</span>
+                                {b.ahId && <button onClick={(e)=>{e.stopPropagation(); setDeleteTarget({type:'adhoc',id:b.ahId,label:`${selectedDate} ${formatTimeRange(b.startTime, b.endTime)} ${rm}`});}} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button>}
+                              </div>
+                            ))}
                           </div>
-                        ) : <span className="text-[10px] text-green-600 font-black px-2 py-0.5 bg-green-50 rounded-full border border-green-100 font-black">開放</span>}
+                        ) : <span className="text-[10px] text-green-600 font-black px-2 py-0.5 bg-green-50 rounded-full border border-green-100 font-black mt-1 self-start">開放</span>}
                       </div>
                     );
                   })}
                 </div>
               </div>
 
-              {/* 第三欄：預約登記表單 - 高效佈局 */}
+              {/* 第三欄：預約登記表單 - 小時制 */}
               <div className="flex flex-col p-4 bg-slate-50 justify-start font-black">
                 <div className="p-5 border-2 border-dashed rounded-3xl bg-white border-blue-200 shadow-md font-black">
                   <div className="flex items-center gap-3 mb-4 font-black">
                     <UserPlus className="text-blue-600 font-black" size={24}/>
-                    <h4 className="text-xl font-black text-blue-900 font-black font-black">預約登記登記</h4>
+                    <h4 className="text-xl font-black text-blue-900 font-black font-black">預約登記</h4>
                   </div>
                   
                   <div className="space-y-4 font-black">
@@ -522,11 +650,38 @@ const App = () => {
                       </select>
                     </div>
 
+                    {/* 快捷按鈕：上午/下午 */}
                     <div className="space-y-1 font-black">
-                      <label className="text-[9px] font-black text-slate-400 uppercase ml-2 font-black">時段</label>
-                      <select value={formTime} onChange={(e)=>setFormTime(e.target.value)} className="w-full border-2 border-slate-100 rounded-xl p-2.5 font-black text-lg bg-slate-50 focus:border-blue-500 outline-none text-black font-black font-black">
-                        {TIME_SLOTS.map(s=><option key={s.id} value={s.id}>{s.label}</option>)}
-                      </select>
+                      <label className="text-[9px] font-black text-slate-400 uppercase ml-2 font-black">快速選擇</label>
+                      <div className="flex gap-2">
+                        <button 
+                          onClick={() => { setFormStartTime('08:00'); setFormEndTime('12:00'); }}
+                          className={`flex-1 py-2 rounded-xl font-black text-sm border-2 transition-all ${formStartTime === '08:00' && formEndTime === '12:00' ? 'bg-orange-500 text-white border-orange-500' : 'bg-orange-50 text-orange-700 border-orange-200 hover:border-orange-400'}`}
+                        >
+                          <Sunrise size={14} className="inline mr-1"/> 上午
+                        </button>
+                        <button 
+                          onClick={() => { setFormStartTime('13:00'); setFormEndTime('17:00'); }}
+                          className={`flex-1 py-2 rounded-xl font-black text-sm border-2 transition-all ${formStartTime === '13:00' && formEndTime === '17:00' ? 'bg-blue-500 text-white border-blue-500' : 'bg-blue-50 text-blue-700 border-blue-200 hover:border-blue-400'}`}
+                        >
+                          <Sunset size={14} className="inline mr-1"/> 下午
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1 font-black">
+                        <label className="text-[9px] font-black text-slate-400 uppercase ml-2 font-black">開始時間</label>
+                        <select value={formStartTime} onChange={(e)=>setFormStartTime(e.target.value)} className="w-full border-2 border-slate-100 rounded-xl p-2.5 font-black text-lg bg-slate-50 focus:border-blue-500 outline-none text-black font-black font-black">
+                          {ALL_HOURS.slice(0, -1).map(h=><option key={h} value={h}>{h}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1 font-black">
+                        <label className="text-[9px] font-black text-slate-400 uppercase ml-2 font-black">結束時間</label>
+                        <select value={formEndTime} onChange={(e)=>setFormEndTime(e.target.value)} className="w-full border-2 border-slate-100 rounded-xl p-2.5 font-black text-lg bg-slate-50 focus:border-blue-500 outline-none text-black font-black font-black">
+                          {ALL_HOURS.filter(h => h > formStartTime).map(h=><option key={h} value={h}>{h}</option>)}
+                        </select>
+                      </div>
                     </div>
 
                     <div className="space-y-1 font-black">
@@ -537,13 +692,21 @@ const App = () => {
                       </select>
                     </div>
 
-                    <button 
-                      disabled={!formUser || adhocBookings.some(x=>x.date===selectedDate && x.room===formRoom && x.timeSlot===formTime)}
-                      onClick={()=>{ handleAddAdhoc(selectedDate, formRoom, formUser, formTime); setSelectedDate(null); setFormUser(""); }} 
-                      className="w-full bg-blue-700 text-white py-4 rounded-2xl font-black text-xl shadow-lg hover:bg-blue-800 active:scale-95 transition-all mt-4 disabled:bg-slate-300 disabled:shadow-none font-black font-black"
-                    >
-                      {adhocBookings.some(x=>x.date===selectedDate && x.room===formRoom && x.timeSlot===formTime) ? '時段佔用中' : '確認預約'}
-                    </button>
+                    {(() => {
+                      const conflict = hasConflict(formRoom, selectedDate, formStartTime, formEndTime, adhocBookings, fixedSchedules);
+                      const invalidTime = formStartTime >= formEndTime;
+                      const disabled = !formUser || conflict || invalidTime;
+                      
+                      return (
+                        <button 
+                          disabled={disabled}
+                          onClick={()=>{ handleAddAdhoc(selectedDate, formRoom, formUser, formStartTime, formEndTime); setSelectedDate(null); setFormUser(""); }} 
+                          className={`w-full py-4 rounded-2xl font-black text-xl shadow-lg transition-all mt-4 ${disabled ? 'bg-slate-300 text-slate-500 shadow-none' : 'bg-blue-700 text-white hover:bg-blue-800 active:scale-95'}`}
+                        >
+                          {conflict ? '時段佔用中' : invalidTime ? '時間無效' : '確認預約'}
+                        </button>
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
